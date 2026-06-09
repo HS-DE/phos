@@ -1,17 +1,21 @@
 # ============================================================
 # Phosphosite-friendly batch DE / FC-only analysis
 #
-# This file replaces the older protein/gene-centric batch DE function.
-# It keeps the function name run_batch_de_mixed() for compatibility, but the
-# internal logic is adapted for phosphosite / modified phosphopeptide features.
+# Function kept for compatibility:
+#   run_batch_de_mixed()
 #
-# Key changes:
-#   1) Row names are feature_id, not necessarily Gene.
-#   2) Feature IDs are preserved exactly.
-#   3) No absolute local source path is used.
-#   4) If both groups have enough replicates, limma_de() is used.
-#   5) If replicates are insufficient, group-level FC-only is used and P values
-#      are intentionally set to NA.
+# Expected input:
+#   expr        : numeric matrix, rownames = feature_id, colnames = sample_id
+#   sample_info : data.frame, contains sample_id and group information
+#
+# Important:
+#   For phosphoproteomics, rownames are feature_id, not simple Gene symbols.
+#   Feature IDs are preserved exactly.
+#
+# Single-sample / low-replicate support:
+#   If either group has fewer than min_reps_for_limma samples, the function uses
+#   group_FC_only. In that mode, logFC is calculated but P.Value and adj.P.Val
+#   are intentionally NA.
 # ============================================================
 
 run_batch_de_mixed <- function(
@@ -50,6 +54,11 @@ run_batch_de_mixed <- function(
   export_excel = TRUE,
   export_deg_summary = TRUE
 ) {
+  suppressPackageStartupMessages({
+    requireNamespace("dplyr", quietly = TRUE)
+    requireNamespace("tidyr", quietly = TRUE)
+  })
+
   # -------------------------
   # 0. Basic checks
   # -------------------------
@@ -98,12 +107,9 @@ run_batch_de_mixed <- function(
 
   if (isTRUE(create_dir)) dir.create(base_out_dir, recursive = TRUE, showWarnings = FALSE)
 
-  # Make sure limma_de() exists when limma is needed.
   if (!exists("limma_de", mode = "function")) {
     local_limma_file <- "limma差异.R"
-    if (file.exists(local_limma_file)) {
-      source(local_limma_file)
-    }
+    if (file.exists(local_limma_file)) source(local_limma_file)
   }
 
   # -------------------------
@@ -112,10 +118,9 @@ run_batch_de_mixed <- function(
   safe_slug <- function(x) {
     x <- as.character(x)
     x <- gsub("[[:space:]]+", "_", x)
-    x <- gsub("[/\\:;\
-*\?\"<>\|]", "_", x)
-    x <- gsub("[\+]", "plus", x)
-    x <- gsub("[^[:alnum:]_\-\.]", "_", x)
+    x <- gsub("[/\\\\:;*?\"<>|]", "_", x)
+    x <- gsub("\\+", "plus", x)
+    x <- gsub("[^[:alnum:]_.-]", "_", x)
     x <- gsub("_+", "_", x)
     x <- gsub("^_|_$", "", x)
     x
@@ -159,7 +164,7 @@ run_batch_de_mixed <- function(
   }
 
   # -------------------------
-  # 2. FC-only for low replicate comparison
+  # 2. FC-only for low replicate comparisons
   # -------------------------
   group_fc_only_de <- function(group1, group2, save_prefix = NULL, summary_fun = c("mean", "median")) {
     summary_fun <- match.arg(summary_fun)
@@ -173,12 +178,7 @@ run_batch_de_mixed <- function(
     X1 <- expr[, s1, drop = FALSE]
     X2 <- expr[, s2, drop = FALSE]
 
-    if (is.null(assume_log2)) {
-      is_log2 <- guess_is_log2(c(as.numeric(X1), as.numeric(X2)))
-    } else {
-      is_log2 <- isTRUE(assume_log2)
-    }
-
+    is_log2 <- if (is.null(assume_log2)) guess_is_log2(c(as.numeric(X1), as.numeric(X2))) else isTRUE(assume_log2)
     if (!is_log2) {
       X1 <- log2(X1 + add1)
       X2 <- log2(X2 + add1)
@@ -194,7 +194,7 @@ run_batch_de_mixed <- function(
     g1[is.nan(g1)] <- NA_real_
     g2[is.nan(g2)] <- NA_real_
 
-    # logFC = group1 - group2, consistent with limma_de(group1, group2)
+    # logFC = group1 - group2, same direction as limma_de(group1, group2)
     logFC <- g1 - g2
     AveExpr <- (g1 + g2) / 2
 
@@ -218,13 +218,7 @@ run_batch_de_mixed <- function(
     )
     rownames(tt) <- tt$feature_id
 
-    combined <- cbind(
-      tt,
-      group1_stat = g1,
-      group2_stat = g2,
-      expr[, c(s1, s2), drop = FALSE]
-    )
-
+    combined <- cbind(tt, group1_stat = g1, group2_stat = g2, expr[, c(s1, s2), drop = FALSE])
     deg <- tt$feature_id[tt$direction %in% c("Up", "Down")]
     saved_files <- character(0)
 
@@ -318,7 +312,7 @@ run_batch_de_mixed <- function(
   }
 
   # -------------------------
-  # 3. Build compare list
+  # 3. Build pairwise compare list
   # -------------------------
   if (!is.null(compare_list)) {
     compare_list <- as.data.frame(compare_list, check.names = FALSE)
