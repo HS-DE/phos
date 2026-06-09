@@ -15,13 +15,11 @@
 #   rownames   : kinase / kinase-signature names
 #   colnames   : pvalue, # of substrates, substrates
 #
-# Note:
-#   PhosR's annotation contains both canonical kinase names, such as MAPK1,
-#   AKT1, CDK1, and source-prefixed kinase signatures, such as Yang.S6K or
-#   Humphrey.mTOR. Those names come from PhosR's annotation/result object, not
-#   from the user's DIA-NN data. By default, this script removes source-prefixed
-#   signatures with prefixes Yang. and Humphrey. You can disable this by setting:
-#     drop_source_prefixed_signatures = FALSE
+# Important:
+#   site_mat2 is a site-level table. Multi-phosphorylated peptides can appear
+#   more than once because one modified peptide maps to several phosphosites.
+#   For KSEA, keep_only_single_site = TRUE filters these multi-site rows before
+#   feature_id uniqueness is checked.
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -31,9 +29,6 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
-# ------------------------------------------------------------
-# 0. Utilities
-# ------------------------------------------------------------
 .safe_dir_create <- function(path) {
   if (!is.null(path) && nzchar(path)) {
     dir.create(path, recursive = TRUE, showWarnings = FALSE)
@@ -83,13 +78,10 @@ load_phosr_kinase_annotation <- function(species = c("mouse", "human")) {
 normalize_kinase_annotation <- function(annotation,
                                         annotation_kinase_col = NULL,
                                         annotation_site_col = NULL) {
-  # PhosR default annotation is a named list:
-  #   names(annotation) = kinase / kinase-signature names
-  #   annotation[[name]] = substrate site labels, e.g. GENE;S123;
   if (is.list(annotation) && !is.data.frame(annotation)) {
     kinase_names <- names(annotation)
     if (is.null(kinase_names) || any(is.na(kinase_names)) || any(kinase_names == "")) {
-      stop("annotation 是 list，但 names(annotation) 不完整；无法明确 kinase 名称。")
+      stop("annotation 是 list，但 names(annotation) 不完整；无法明确 kinase/signature 名称。")
     }
 
     anno_tbl <- tibble::tibble(
@@ -97,7 +89,6 @@ normalize_kinase_annotation <- function(annotation,
       site_label = as.character(unlist(annotation, use.names = FALSE))
     )
   } else {
-    # Custom annotation must be explicit. No column guessing is allowed.
     anno_df <- as.data.frame(annotation, check.names = FALSE, stringsAsFactors = FALSE)
 
     if (is.null(annotation_kinase_col) || is.null(annotation_site_col)) {
@@ -132,7 +123,7 @@ build_ksea_site_annotation <- function(site_mat2,
                                        feature_id_cols = c("Protein.Id", "Genes", "Residue.Both", "Modified.Sequence"),
                                        keep_only_single_site = TRUE,
                                        uppercase_gene = TRUE,
-                                       stop_if_duplicated_feature_id = TRUE) {
+                                       stop_if_ambiguous_feature_id = TRUE) {
   site_mat2 <- .read_table_if_path(site_mat2)
   site_mat2 <- as.data.frame(site_mat2, check.names = FALSE, stringsAsFactors = FALSE)
 
@@ -155,25 +146,42 @@ build_ksea_site_annotation <- function(site_mat2,
       )
     )
 
-  if (stop_if_duplicated_feature_id && anyDuplicated(site_anno$feature_id) > 0) {
-    dup <- unique(site_anno$feature_id[duplicated(site_anno$feature_id)])
-    stop(
-      "site_mat2 生成的 feature_id 存在重复。请先检查上游位点合并逻辑。示例重复 feature_id: ",
-      paste(utils::head(dup, 10), collapse = "; ")
-    )
-  }
-
-  if (uppercase_gene) {
-    site_anno <- site_anno %>% mutate(GeneSymbol = toupper(GeneSymbol))
-  }
-
-  if (keep_only_single_site) {
+  # Important: multi-site peptides are expected to generate repeated feature_id
+  # rows in site_mat2. They must be filtered before feature_id ambiguity checks.
+  if (isTRUE(keep_only_single_site)) {
     site_anno <- site_anno %>% filter(n_site_in_row == 1L)
   }
 
-  site_anno %>%
+  if (isTRUE(uppercase_gene)) {
+    site_anno <- site_anno %>% mutate(GeneSymbol = toupper(GeneSymbol))
+  }
+
+  site_anno <- site_anno %>%
     filter(!is.na(Site), !is.na(Residue), Residue %in% c("S", "T", "Y")) %>%
-    mutate(site_label = paste0(GeneSymbol, ";", Residue, Site, ";")) %>%
+    mutate(site_label = paste0(GeneSymbol, ";", Residue, Site, ";"))
+
+  # Repeated identical mappings are harmless and are collapsed. Only one feature_id
+  # mapping to multiple different site_label values is truly ambiguous.
+  ambiguity_tbl <- site_anno %>%
+    group_by(feature_id) %>%
+    summarise(
+      n_rows = n(),
+      n_site_label = n_distinct(site_label),
+      site_labels = paste(unique(site_label), collapse = ";"),
+      .groups = "drop"
+    ) %>%
+    filter(n_site_label > 1)
+
+  if (isTRUE(stop_if_ambiguous_feature_id) && nrow(ambiguity_tbl) > 0) {
+    stop(
+      "KSEA 位点注释中存在同一个 feature_id 对应多个不同 site_label 的情况。请检查上游映射。示例: ",
+      paste(utils::head(ambiguity_tbl$feature_id, 10), collapse = "; ")
+    )
+  }
+
+  site_anno %>%
+    arrange(feature_id, site_label) %>%
+    distinct(feature_id, site_label, .keep_all = TRUE) %>%
     distinct(feature_id, .keep_all = TRUE)
 }
 
