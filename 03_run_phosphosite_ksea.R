@@ -21,9 +21,10 @@
 #   01_ksea_site_annotation.csv
 #   02_ksea_de_results_with_site_label.csv
 #   per-comparison KSEA input vectors and enrichment tables
+#   per-comparison KSEA signed-score heatmaps/barplots
 #   all_rank_based_KSEA_signed_score_long.csv
 #   all_rank_based_KSEA_signed_score_wide.csv
-#   kinase signed-score heatmap
+#   global kinase signed-score heatmap
 #
 # Important:
 #   This is an exploratory kinase activity inference when there are no biological
@@ -132,11 +133,8 @@ build_ksea_site_annotation <- function(site_mat2,
 
   site_anno <- site_anno %>%
     filter(!is.na(Site), !is.na(Residue), Residue %in% c("S", "T", "Y")) %>%
-    mutate(
-      site_label = paste0(GeneSymbol, ";", Residue, Site, ";")
-    )
+    mutate(site_label = paste0(GeneSymbol, ";", Residue, Site, ";"))
 
-  # Keep one row per feature_id. In most cases feature_id is already unique.
   site_anno %>% distinct(feature_id, .keep_all = TRUE)
 }
 
@@ -200,6 +198,8 @@ make_signed_ksea_score <- function(enr_up, enr_down, comparison) {
         p_up <= p_down ~ "UP_or_greater",
         TRUE ~ "DOWN_or_less"
       ),
+      # signed_score > 0: substrates tend to be higher in the numerator group.
+      # signed_score < 0: substrates tend to be lower in the numerator group.
       signed_score = case_when(
         is.na(p_best) ~ NA_real_,
         dominant_direction == "UP_or_greater" ~ -log10(pmax(p_best, .Machine$double.xmin)),
@@ -211,13 +211,107 @@ make_signed_ksea_score <- function(enr_up, enr_down, comparison) {
 }
 
 # ------------------------------------------------------------
-# 4. Run one rank-based KSEA comparison
+# 4. Plot per-comparison KSEA results
+# ------------------------------------------------------------
+plot_one_ksea_signed_score <- function(signed_score,
+                                       comparison,
+                                       comp_dir,
+                                       top_n = 30,
+                                       make_heatmap = TRUE,
+                                       make_barplot = TRUE) {
+  saved_files <- character(0)
+
+  if (is.null(signed_score) || nrow(signed_score) == 0) {
+    return(saved_files)
+  }
+
+  plot_df <- signed_score %>%
+    filter(!is.na(signed_score), !is.na(Kinase), Kinase != "") %>%
+    arrange(desc(abs(signed_score))) %>%
+    slice_head(n = top_n) %>%
+    mutate(
+      Kinase = as.character(Kinase),
+      Kinase_plot = factor(Kinase, levels = rev(Kinase)),
+      activity_direction = ifelse(signed_score >= 0, "Higher", "Lower")
+    )
+
+  if (nrow(plot_df) == 0) {
+    return(saved_files)
+  }
+
+  comp_slug <- .safe_slug(comparison)
+
+  if (isTRUE(make_barplot) && requireNamespace("ggplot2", quietly = TRUE)) {
+    p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = Kinase_plot, y = signed_score, fill = activity_direction)) +
+      ggplot2::geom_col(width = 0.75) +
+      ggplot2::coord_flip() +
+      ggplot2::geom_hline(yintercept = 0, linewidth = 0.3) +
+      ggplot2::labs(
+        x = NULL,
+        y = "Rank-based KSEA signed score",
+        fill = "Direction",
+        title = comparison
+      ) +
+      ggplot2::theme_bw() +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(hjust = 0.5),
+        axis.text.y = ggplot2::element_text(size = 7)
+      )
+
+    f_pdf <- file.path(comp_dir, paste0(comp_slug, "_signed_score_barplot.pdf"))
+    f_png <- file.path(comp_dir, paste0(comp_slug, "_signed_score_barplot.png"))
+    ggplot2::ggsave(f_pdf, p, width = 7, height = max(5, 0.18 * nrow(plot_df) + 2), dpi = 300)
+    ggplot2::ggsave(f_png, p, width = 7, height = max(5, 0.18 * nrow(plot_df) + 2), dpi = 300)
+    saved_files <- c(saved_files, f_pdf, f_png)
+  }
+
+  if (isTRUE(make_heatmap) && requireNamespace("pheatmap", quietly = TRUE)) {
+    mat <- as.matrix(plot_df$signed_score)
+    rownames(mat) <- plot_df$Kinase
+    colnames(mat) <- comparison
+
+    f_pdf <- file.path(comp_dir, paste0(comp_slug, "_signed_score_heatmap.pdf"))
+    f_png <- file.path(comp_dir, paste0(comp_slug, "_signed_score_heatmap.png"))
+
+    grDevices::pdf(f_pdf, width = 4.8, height = max(5, 0.16 * nrow(mat) + 2))
+    pheatmap::pheatmap(
+      mat,
+      cluster_rows = FALSE,
+      cluster_cols = FALSE,
+      fontsize_row = 7,
+      fontsize_col = 8,
+      main = comparison
+    )
+    grDevices::dev.off()
+
+    grDevices::png(f_png, width = 4.8, height = max(5, 0.16 * nrow(mat) + 2), units = "in", res = 600)
+    pheatmap::pheatmap(
+      mat,
+      cluster_rows = FALSE,
+      cluster_cols = FALSE,
+      fontsize_row = 7,
+      fontsize_col = 8,
+      main = comparison
+    )
+    grDevices::dev.off()
+
+    saved_files <- c(saved_files, f_pdf, f_png)
+  }
+
+  saved_files
+}
+
+# ------------------------------------------------------------
+# 5. Run one rank-based KSEA comparison
 # ------------------------------------------------------------
 run_one_rank_based_ksea <- function(stats_tbl,
                                     comparison,
                                     annotation,
                                     out_dir,
-                                    min_sites = 10) {
+                                    min_sites = 10,
+                                    make_per_comparison_heatmap = TRUE,
+                                    make_per_comparison_barplot = TRUE,
+                                    top_n_per_comparison = 30) {
   comp_slug <- .safe_slug(comparison)
   comp_dir <- file.path(out_dir, comp_slug)
   .safe_dir_create(comp_dir)
@@ -241,7 +335,8 @@ run_one_rank_based_ksea <- function(stats_tbl,
       input_stats = stats_tbl,
       enrichment_up = data.frame(),
       enrichment_down = data.frame(),
-      signed_score = data.frame()
+      signed_score = data.frame(),
+      plot_files = character(0)
     ))
   }
 
@@ -269,17 +364,27 @@ run_one_rank_based_ksea <- function(stats_tbl,
   utils::write.csv(enr_down_n, file.path(comp_dir, paste0(comp_slug, "_rank_KSEA_DOWN_less.csv")), row.names = FALSE)
   utils::write.csv(signed_score, file.path(comp_dir, paste0(comp_slug, "_rank_KSEA_signed_score.csv")), row.names = FALSE)
 
+  plot_files <- plot_one_ksea_signed_score(
+    signed_score = signed_score,
+    comparison = comparison,
+    comp_dir = comp_dir,
+    top_n = top_n_per_comparison,
+    make_heatmap = make_per_comparison_heatmap,
+    make_barplot = make_per_comparison_barplot
+  )
+
   list(
     comparison = comparison,
     input_stats = stats_tbl,
     enrichment_up = enr_up_n,
     enrichment_down = enr_down_n,
-    signed_score = signed_score
+    signed_score = signed_score,
+    plot_files = plot_files
   )
 }
 
 # ------------------------------------------------------------
-# 5. Main wrapper
+# 6. Main wrapper
 # ------------------------------------------------------------
 run_phosphosite_ksea <- function(de_results,
                                  site_mat2,
@@ -292,7 +397,10 @@ run_phosphosite_ksea <- function(de_results,
                                  uppercase_gene = TRUE,
                                  min_sites = 10,
                                  make_heatmap = TRUE,
-                                 top_n_kinases_heatmap = 80) {
+                                 top_n_kinases_heatmap = 80,
+                                 make_per_comparison_heatmap = TRUE,
+                                 make_per_comparison_barplot = TRUE,
+                                 top_n_per_comparison = 30) {
   species <- match.arg(species)
   .safe_dir_create(out_dir)
 
@@ -358,12 +466,22 @@ run_phosphosite_ksea <- function(de_results,
       comparison = cn,
       annotation = annotation,
       out_dir = out_dir,
-      min_sites = min_sites
+      min_sites = min_sites,
+      make_per_comparison_heatmap = make_per_comparison_heatmap,
+      make_per_comparison_barplot = make_per_comparison_barplot,
+      top_n_per_comparison = top_n_per_comparison
     )
   }
 
   signed_long <- bind_rows(lapply(result_list, `[[`, "signed_score"))
   utils::write.csv(signed_long, file.path(out_dir, "all_rank_based_KSEA_signed_score_long.csv"), row.names = FALSE)
+
+  plot_files <- unlist(lapply(result_list, `[[`, "plot_files"), use.names = FALSE)
+  utils::write.csv(
+    data.frame(plot_file = unique(plot_files), stringsAsFactors = FALSE),
+    file.path(out_dir, "per_comparison_plot_files.csv"),
+    row.names = FALSE
+  )
 
   if (nrow(signed_long) > 0) {
     signed_wide <- signed_long %>%
@@ -409,6 +527,7 @@ run_phosphosite_ksea <- function(de_results,
     result_list = result_list,
     signed_long = signed_long,
     signed_wide = signed_wide,
+    per_comparison_plot_files = unique(plot_files),
     annotation = annotation
   ))
 }
@@ -424,7 +543,10 @@ run_phosphosite_ksea <- function(de_results,
 #   out_dir = "./demo/Results/phosphosite_KSEA",
 #   species = "mouse",
 #   keep_only_single_site = TRUE,
-#   min_sites = 10
+#   min_sites = 10,
+#   make_per_comparison_heatmap = TRUE,
+#   make_per_comparison_barplot = TRUE,
+#   top_n_per_comparison = 30
 # )
 #
 # # Or use exported CSV files:
