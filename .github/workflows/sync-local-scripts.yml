@@ -1,0 +1,55 @@
+name: Sync local phosphoproteomics scripts
+
+on:
+  push:
+    paths:
+      - '.sync_local/**'
+      - '.github/workflows/sync-local-scripts.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct exact local scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          decode_script() {
+            local src="$1"
+            local dst="$2"
+            base64 -d "$src" | gzip -dc > "$dst"
+          }
+
+          decode_script ".sync_local/03_run_phosphosite_ksea.R.gz.b64" "03_run_phosphosite_ksea.R"
+          decode_script ".sync_local/06_domain_analysis.R.gz.b64" "06_domain_analysis.R"
+          decode_script ".sync_local/limma_diff.R.gz.b64" "limma差异.R"
+          decode_script ".sync_local/batch_de.R.gz.b64" "批量差异分析_整合多组比较.R"
+
+          test "$(git hash-object '03_run_phosphosite_ksea.R')" = "ee07ab9e8757d9d13802bca7ed7d5e531377c226"
+          test "$(git hash-object '06_domain_analysis.R')" = "203018c66e03c37506fe30ae825ccb90ce40ffda"
+          test "$(git hash-object 'limma差异.R')" = "fc79cb06e61c901e3dc95f2a31c267997c9219d0"
+          test "$(git hash-object '批量差异分析_整合多组比较.R')" = "3bf7ea907dc338c2ef7330328654befc2fac41d7"
+
+          git rm --ignore-unmatch "批量差异分析_整合多组比较_修正版.R"
+          rm -rf .sync_local
+          rm -f .github/workflows/sync-local-scripts.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "Sync current local phosphoproteomics scripts"
+          git push origin HEAD:main
