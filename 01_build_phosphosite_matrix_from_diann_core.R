@@ -292,7 +292,7 @@ select_representative_site_mapping <- function(site_map_all, out_dir = NULL) {
     ) %>%
     group_by(Protein.Group, Protein.Ids, Genes, Stripped.Sequence, Modified.Sequence, phos_index) %>%
     arrange(mapping_rank, protein_id_order, pep_start, .by_group = TRUE) %>%
-    slice(1) %>%
+    dplyr::slice(1) %>%
     ungroup() %>%
     select(-is_leading, -is_canonical, -mapping_rank)
 
