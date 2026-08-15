@@ -467,11 +467,66 @@ plot_domain_analysis_bar <- function(domain_count,
                                      save_formats = c("pdf", "png"),
                                      width = 8,
                                      height = 6,
-                                     dpi = 300) {
+                                     dpi = 300,
+                                     shorten_max_len = 45,
+                                     description_mode = c("wrap", "truncate")) {
+  description_mode <- match.arg(description_mode)
+  
+  wrap_text_by_width <- function(x, width) {
+    x <- as.character(x)
+    width_num <- suppressWarnings(as.numeric(width)[1])
+    
+    if (is.na(width_num) || !is.finite(width_num) || width_num <= 0) {
+      return(x)
+    }
+    
+    width_num <- as.integer(width_num)
+    
+    vapply(
+      x,
+      function(s) {
+        if (is.na(s) || s == "") return(s)
+        paste(base::strwrap(s, width = width_num), collapse = "\n")
+      },
+      FUN.VALUE = character(1),
+      USE.NAMES = FALSE
+    )
+  }
+  
+  truncate_text_by_width <- function(x, width) {
+    x <- as.character(x)
+    width_num <- suppressWarnings(as.numeric(width)[1])
+    
+    if (is.na(width_num) || !is.finite(width_num) || width_num <= 0) {
+      return(x)
+    }
+    
+    width_num <- as.integer(width_num)
+    
+    vapply(
+      x,
+      function(s) {
+        if (is.na(s) || s == "") return(s)
+        if (nchar(s) <= width_num) return(s)
+        paste0(substr(s, 1, width_num), "...")
+      },
+      FUN.VALUE = character(1),
+      USE.NAMES = FALSE
+    )
+  }
+  
+  format_domain_description <- function(x) {
+    if (identical(description_mode, "wrap")) {
+      return(wrap_text_by_width(x, shorten_max_len))
+    }
+    
+    truncate_text_by_width(x, shorten_max_len)
+  }
+  
   df <- domain_count %>%
-    filter(comparison == !!comparison) %>%
-    arrange(desc(protein_count), Domain.Name) %>%
-    slice_head(n = top_n)
+    dplyr::filter(comparison == !!comparison) %>%
+    dplyr::arrange(desc(protein_count), Domain.Name) %>%
+    dplyr::slice_head(n = top_n)
   
   if (nrow(df) == 0) {
     warning("No domain count data to plot for comparison: ", comparison)
@@ -479,38 +534,66 @@ plot_domain_analysis_bar <- function(domain_count,
   }
   
   df <- df %>%
-    mutate(
-      Domain.Name = factor(Domain.Name, levels = rev(Domain.Name))
+    dplyr::mutate(
+      Domain.Name.Original = Domain.Name,
+      Domain.Name.Plot = format_domain_description(Domain.Name)
+    ) %>%
+    dplyr::mutate(
+      Domain.Name.Plot = factor(
+        Domain.Name.Plot,
+        levels = rev(unique(Domain.Name.Plot))
+      )
     )
   
-  p <- ggplot(df, aes(x = protein_count, y = Domain.Name)) +
-    geom_col(width = 0.75, fill = "#4B3B91") +
-    geom_text(
-      aes(label = protein_count),
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = protein_count, y = Domain.Name.Plot)) +
+    ggplot2::geom_col(width = 0.75, fill = "#4B3B91") +
+    ggplot2::geom_text(
+      ggplot2::aes(label = protein_count),
       hjust = -0.2,
       size = 3.5
     ) +
-    scale_x_continuous(expand = expansion(mult = c(0, 0.12))) +
-    labs(
+    ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0, 0.12))) +
+    ggplot2::labs(
       title = "Domain Analysis",
       x = "The number of Proteins",
       y = paste0("Domain Name(Top ", top_n, ")")
     ) +
-    theme_bw() +
-    theme(
-      plot.title = element_text(hjust = 0.5),
-      panel.grid.major.y = element_blank(),
-      panel.grid.minor = element_blank()
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5),
+      axis.text.y = ggplot2::element_text(size = 10, colour = "black"),
+      axis.text.x = ggplot2::element_text(size = 11, colour = "black"),
+      panel.grid.major.y = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank()
     )
   
   for (fmt in tolower(save_formats)) {
     outfile <- paste0(out_prefix, ".", fmt)
-    ggsave(outfile, p, width = width, height = height, dpi = dpi)
+    
+    if (fmt %in% c("tiff", "tif")) {
+      ggplot2::ggsave(
+        outfile,
+        plot = p,
+        width = width,
+        height = height,
+        dpi = dpi,
+        units = "in",
+        compression = "lzw"
+      )
+    } else {
+      ggplot2::ggsave(
+        outfile,
+        plot = p,
+        width = width,
+        height = height,
+        dpi = dpi,
+        units = "in"
+      )
+    }
   }
   
   invisible(p)
 }
-
 # ------------------------------------------------------------
 # 6. Plot Domain Enrichment bubble plot
 # ------------------------------------------------------------
@@ -853,7 +936,7 @@ run_phosphosite_domain_analysis <- function(
     )
     
     plot_domain_enrichment_bubble(
-      domain_enrich = domain_enrichment,
+      enrich_df = domain_enrichment,
       comparison = comp,
       out_prefix = file.path(
         plot_dir,
