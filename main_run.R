@@ -202,4 +202,3 @@ domain_res <- run_phosphosite_domain_analysis(
   keep_directions = c("Up", "Down"),
   top_n = 20
 )
-
